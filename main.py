@@ -128,6 +128,19 @@ def detect_people(net, frame, threshold: float):
     return people
 
 
+def load_network(prototxt: Path, weights: Path):
+    loader = getattr(cv2.dnn, "readNetFromCaffe", None)
+    if loader is None:
+        version = getattr(cv2, "__version__", "unknown")
+        raise RuntimeError(
+            f"OpenCV {version} has no Caffe model loader. This application currently "
+            "requires OpenCV 4.x. In the active virtual environment run: "
+            "pip uninstall -y opencv-python opencv-python-headless && "
+            "pip install 'opencv-python>=4.8,<5'"
+        )
+    return loader(str(prototxt), str(weights))
+
+
 def main() -> int:
     args = parse_args()
     prototxt = args.model_dir / "MobileNetSSD_deploy.prototxt"
@@ -138,7 +151,7 @@ def main() -> int:
         print("Run: python download_models.py", file=sys.stderr)
         return 2
 
-    net = cv2.dnn.readNetFromCaffe(str(prototxt), str(weights))
+    net = load_network(prototxt, weights)
     camera = Camera(args.camera, args.camera_index, (args.width, args.height))
     output = Output(args.gpio, args.active_low, args.no_gpio)
     output.blink(args.startup_blink)

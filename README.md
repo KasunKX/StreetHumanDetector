@@ -19,6 +19,13 @@ sudo apt install -y python3-opencv python3-gpiozero python3-picamera2
 python3 download_models.py
 ```
 
+If using a virtual environment instead of the Raspberry Pi OS packages, keep
+OpenCV below version 5 because OpenCV 5 removed its Caffe model loader:
+
+```bash
+pip install -r requirements.txt
+```
+
 Picamera2 is used automatically when available; otherwise the program opens USB
 camera 0. Start the detector without a desktop preview:
 
