@@ -10,7 +10,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import quote
+from urllib.request import urlopen
 
 import cv2
 import numpy as np
@@ -18,6 +20,10 @@ import numpy as np
 
 PERSON_CLASS_ID = 0
 YOLO_INPUT_SIZE = 640
+MODEL_FILENAME = "yolov8n.onnx"
+MODEL_DOWNLOAD_URL = (
+    "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.onnx"
+)
 
 
 def load_config(path: Path) -> dict:
@@ -93,6 +99,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--active-low", action="store_true", help="Use LOW as the active output")
     parser.add_argument("--no-gpio", action="store_true", help="Run without GPIO hardware")
     parser.add_argument("--model-dir", type=Path, default=Path(__file__).parent / "models")
+    parser.add_argument(
+        "--weights", type=Path, default=None,
+        help="Use this ONNX file directly instead of the auto-downloaded default "
+             "(config default: models/yolov8n.onnx)",
+    )
+    parser.add_argument(
+        "--input-size", type=int, default=None,
+        help="Network input size in pixels; must match --weights (config default: 640)",
+    )
+    parser.add_argument(
+        "--threads", type=int, default=None,
+        help="cv2 thread count override (config default: OpenCV's own default)",
+    )
     return parser.parse_args()
 
 
@@ -312,8 +331,8 @@ class StatusMonitor:
         self.thread.join(timeout=1.5)
 
 
-def detect_people(net, frame, threshold: float):
-    """Run YOLOv8n and return person boxes as (x1, y1, x2, y2, confidence)."""
+def preprocess(frame):
+    """Letterbox frame to a square canvas and build the YOLO input blob."""
     height, width = frame.shape[:2]
     length = max(height, width)
     square = np.zeros((length, length, 3), dtype=np.uint8)
@@ -322,8 +341,12 @@ def detect_people(net, frame, threshold: float):
     blob = cv2.dnn.blobFromImage(
         square, scalefactor=1 / 255, size=(YOLO_INPUT_SIZE, YOLO_INPUT_SIZE), swapRB=True
     )
-    net.setInput(blob)
-    outputs = cv2.transpose(net.forward()[0])
+    return blob, scale, width, height
+
+
+def postprocess(raw_output, scale: float, width: int, height: int, threshold: float):
+    """Turn a raw (84, N) YOLOv8 output into person boxes as (x1, y1, x2, y2, confidence)."""
+    outputs = cv2.transpose(raw_output)
     boxes = []
     scores = []
     for row in outputs:
@@ -349,6 +372,14 @@ def detect_people(net, frame, threshold: float):
     return people
 
 
+def detect_people(net, frame, threshold: float):
+    """Run YOLOv8n and return person boxes as (x1, y1, x2, y2, confidence)."""
+    blob, scale, width, height = preprocess(frame)
+    net.setInput(blob)
+    raw_output = net.forward()[0]
+    return postprocess(raw_output, scale, width, height, threshold)
+
+
 def confirm_detection(
     max_confidence: float,
     weak_history: deque[bool],
@@ -362,6 +393,25 @@ def confirm_detection(
     strong_detected = max_confidence >= strong_threshold
     confirmed = strong_detected or (weak_detected and weak_hits >= 2)
     return confirmed, weak_hits
+
+
+def ensure_weights(model_dir: Path) -> Path:
+    """Return the ONNX weights path, downloading the official export if missing."""
+    weights = model_dir / MODEL_FILENAME
+    if weights.is_file():
+        return weights
+    model_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Model not found at {weights}; downloading from {MODEL_DOWNLOAD_URL}", flush=True)
+    tmp_path = weights.with_suffix(".onnx.part")
+    try:
+        with urlopen(MODEL_DOWNLOAD_URL, timeout=120) as response:
+            tmp_path.write_bytes(response.read())
+    except (OSError, URLError) as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Could not download {MODEL_FILENAME}: {exc}") from exc
+    tmp_path.replace(weights)
+    print(f"Saved {weights} ({weights.stat().st_size / 1_000_000:.1f} MB)", flush=True)
+    return weights
 
 
 def load_network(weights: Path):
@@ -383,24 +433,42 @@ def main() -> int:
     )
     args.fps = args.fps if args.fps is not None else float(config.get("fps", 4.0))
     gpio = args.gpio if args.gpio is not None else int(config.get("gpio", 11))
+    weights_override = args.weights if args.weights is not None else config.get("weights")
+    input_size = (
+        args.input_size if args.input_size is not None else config.get("input_size")
+    )
+    threads = args.threads if args.threads is not None else config.get("threads")
     if not 0.0 <= args.threshold <= args.strong_threshold <= 1.0:
         raise RuntimeError("Thresholds must satisfy 0 <= threshold <= strong_threshold <= 1")
     if args.off_delay < 0 or args.fps < 0:
         raise RuntimeError("off_delay and fps cannot be negative")
+    if input_size:
+        global YOLO_INPUT_SIZE
+        YOLO_INPUT_SIZE = int(input_size)
+    if threads:
+        cv2.setNumThreads(int(threads))
     print(
         f"Settings: fps={args.fps:g} weak_threshold={args.threshold:g} "
         f"strong_threshold={args.strong_threshold:g} "
-        f"off_delay={args.off_delay:g}s gpio=BCM{gpio}", flush=True,
+        f"off_delay={args.off_delay:g}s gpio=BCM{gpio} "
+        f"input_size={YOLO_INPUT_SIZE} threads={cv2.getNumThreads()}", flush=True,
     )
     output = Output(gpio, args.active_low, args.no_gpio)
     output.flash(args.boot_blink)
     camera = None
     status_monitor = None
     try:
-        weights = args.model_dir / "yolov8n.onnx"
-        if not weights.is_file():
-            print(f"Missing model file: {weights}", file=sys.stderr)
-            return 2
+        if weights_override:
+            weights = Path(weights_override)
+            if not weights.is_file():
+                print(f"Missing model file: {weights}", file=sys.stderr)
+                return 2
+        else:
+            try:
+                weights = ensure_weights(args.model_dir)
+            except RuntimeError as exc:
+                print(exc, file=sys.stderr)
+                return 2
         net = load_network(weights)
         camera = Camera(build_rtsp_url(config))
         output.blink(args.startup_blink)
