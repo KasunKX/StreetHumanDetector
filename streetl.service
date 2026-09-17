@@ -1,0 +1,18 @@
+[Unit]
+Description=StreetL RTSP human detector and light controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/Desktop/StreetHumanDetector
+Environment=GPIOZERO_PIN_FACTORY=lgpio
+Environment=OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp
+ExecStart=/home/admin/Desktop/StreetHumanDetector/.venv/bin/python -u /home/admin/Desktop/StreetHumanDetector/main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

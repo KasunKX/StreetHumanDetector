@@ -1,0 +1,13 @@
+{
+  "ip": "192.168.1.50",
+  "port": 554,
+  "username": "admin",
+  "password": "change-me",
+  "channel": 1,
+  "stream": "main",
+  "gpio": 11,
+  "fps": 4,
+  "threshold": 0.25,
+  "strong_threshold": 0.5,
+  "off_delay": 3
+}

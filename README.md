@@ -1,53 +1,94 @@
-# Raspberry Pi human detector
+# StreetL RTSP human detector
 
-This application detects people with the lightweight MobileNet-SSD model and
-sets physical header pin **11** (BCM **GPIO17**) active while a person is visible.
-At startup, the output pulses for 0.5 seconds as a wiring and output self-test.
+StreetL reads a Hikvision DVR/NVR RTSP stream, detects people with a YOLOv8n
+ONNX model, and controls a Raspberry Pi GPIO output. The deployed configuration
+uses camera 1's main stream (`/Streaming/Channels/101`) and BCM GPIO 11.
 
-## Wiring
+## Detection behavior
 
-Pin 11 is a 3.3 V logic output. Connect an LED through a 330 ohm resistor for a
-basic test. For a relay, lamp, motor, or other load, use a suitable transistor or
-3.3 V-compatible relay module and a flyback diode where required. **Do not power
-a load directly from a GPIO pin.** Join the module ground to a Raspberry Pi GND.
+- A dedicated capture thread continuously drains RTSP and retains only the
+  newest frame, preventing latency from an accumulated video backlog.
+- Inference runs at 4 FPS by default.
+- Confidence `>= 0.50` confirms a person immediately.
+- Confidence from `0.25` through `0.49` requires a hit in 2 of the latest 3
+  processed frames.
+- The output turns off only after 3 continuous seconds without a confirmed
+  detection. A new confirmed detection restarts that delay.
+- A health line is printed every second with stream state, GPIO state, measured
+  FPS, confidence, confirmation state, frame age, and skipped-frame count.
+- Failed RTSP reads use a two-second timeout and reconnect automatically.
 
-## Install on Raspberry Pi OS
+## Files required on the Raspberry Pi
 
-```bash
-sudo apt update
-sudo apt install -y python3-opencv python3-gpiozero python3-picamera2
-python3 download_models.py
+Place a YOLOv8n ONNX model at:
+
+```text
+models/yolov8n.onnx
 ```
 
-If using a virtual environment instead of the Raspberry Pi OS packages, keep
-OpenCV below version 5 because OpenCV 5 removed its Caffe model loader:
+Create the local configuration from the safe example:
 
 ```bash
-pip install -r requirements.txt
+cp config.example.json config.json
 ```
 
-Picamera2 is used automatically when available; otherwise the program opens USB
-camera 0. Start the detector without a desktop preview:
+Edit `config.json` with the real DVR address and credentials. This file is
+Git-ignored and must not be committed.
+
+```json
+{
+  "ip": "192.168.1.50",
+  "port": 554,
+  "username": "admin",
+  "password": "change-me",
+  "channel": 1,
+  "stream": "main",
+  "gpio": 11,
+  "fps": 4,
+  "threshold": 0.25,
+  "strong_threshold": 0.5,
+  "off_delay": 3
+}
+```
+
+`gpio` is a BCM number. BCM 11 is physical header pin 23. Use a suitable
+transistor or 3.3 V-compatible relay module for a lamp or other load; do not
+power a load directly from the GPIO pin.
+
+## Run
+
+Install the Python dependencies in the project's virtual environment and start
+the detector:
 
 ```bash
-python3 main.py
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -u main.py
 ```
 
-Useful test commands:
+For a development machine without GPIO hardware:
 
 ```bash
-# Preview boxes on a connected display
-python3 main.py --preview
-
-# USB webcam and no real GPIO (development/test mode)
-python3 main.py --camera usb --no-gpio --preview
-
-# Active-low relay input and a 2 second output hold time
-python3 main.py --active-low --off-delay 2
-
-# Disable the startup pulse
-python3 main.py --startup-blink 0
+.venv/bin/python main.py --no-gpio --boot-blink 0 --startup-blink 0
 ```
 
-Run `python3 main.py --help` for all settings. Stop with Ctrl+C; shutdown always
-returns the output to its inactive state.
+## systemd service
+
+The recovered service definition expects the same deployed path used by the
+working device:
+
+```text
+/home/admin/Desktop/StreetHumanDetector
+```
+
+Install and start it with:
+
+```bash
+sudo cp streetl.service /etc/systemd/system/streetl.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now streetl
+journalctl -u streetl -f -o cat
+```
+
+The service uses the `lgpio` GPIO backend, forces RTSP over TCP, and restarts
+automatically after failures.
